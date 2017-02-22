@@ -50,6 +50,7 @@ module Koala
         return [] unless batch_calls.length > 0
 
         batch_result = []
+        requeued = Hash.new { |h, k| h[k] = 1 }
         batch_calls.each_slice(MAX_CALLS) do |batch|
           # Turn the call args collected into what facebook expects
           args = {}
@@ -95,15 +96,24 @@ module Koala
                     body
                   end
                 end
-              end
 
-              # turn any results that are pageable into GraphCollections
-              # and pass to post-processing callback if given
-              result = GraphCollection.evaluate(raw_result, @original_api)
-              if batch_op.post_processing
-                batch_result << batch_op.post_processing.call(result)
+                # turn any results that are pageable into GraphCollections
+                # and pass to post-processing callback if given
+                result = GraphCollection.evaluate(raw_result, @original_api)
+                if batch_op.post_processing
+                  batch_result << batch_op.post_processing.call(result)
+                else
+                  batch_result << result
+                end
+              elsif requeued[batch_op] < 3
+                # DON'T submit Log call to koala as it uses a logging pkg koala doesn't use
+                Log.warn("No response for #{batch_op}. Requeuing")
+                requeued[batch_op] += 1
+                batch_calls << batch_op
+              elsif batch_op.post_processing
+                batch_result << batch_op.post_processing.call(Koala::Facebook::ClientError.new(404, '', 'No response from FB'))
               else
-                batch_result << result
+                batch_result << Koala::Facebook::ClientError.new(404, '', 'No response from FB')
               end
             end
           end
